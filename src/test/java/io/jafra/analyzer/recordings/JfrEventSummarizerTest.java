@@ -49,9 +49,9 @@ class JfrEventSummarizerTest {
     @Test
     void summaryReadsCpuTypeFromJfrAndSkipsAddresses() throws Exception {
         persist("sum-cpu", "sum-jfr", "sum-pod", "sum-container", "profile-1.jfr", dumpBusyRecording());
-        try (var selection =
-                catalog.singleFile(catalog.requireRecording("sum-jfr", "sum-pod", "sum-container", "profile-1.jfr"))) {
-            var document = summarizer.summarize(selection, null);
+        var selection =
+                catalog.singleFile(catalog.requireRecording("sum-jfr", "sum-pod", "sum-container", "profile-1.jfr"));
+        var document = summarizer.summarize(selection, null);
 
             assertFalse(document.events().isEmpty());
             document.events().values().forEach(event -> {
@@ -82,7 +82,6 @@ class JfrEventSummarizerTest {
                 List<String> values = cpu.fields().get("cpu").values();
                 assertFalse(values == null || values.isEmpty());
             }
-        }
     }
 
     private void persist(

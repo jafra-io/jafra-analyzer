@@ -13,7 +13,6 @@ import org.jboss.logging.Logger;
 
 import io.jafra.analyzer.storage.ChunkMetadata;
 import io.jafra.analyzer.storage.ChunkStore;
-import io.jafra.analyzer.storage.StitchCache;
 import io.jafra.ingest.v1.AckStatus;
 import io.jafra.ingest.v1.OpenChunk;
 import io.jafra.ingest.v1.UploadAck;
@@ -34,7 +33,6 @@ public class IngestRegistry {
     private final int maxActiveStreams;
     private final int maxMetadataLength;
     private final ChunkStore store;
-    private final StitchCache stitchCache;
     private final Counter accepted;
     private final Counter rejected;
     private final Counter duplicates;
@@ -44,11 +42,9 @@ public class IngestRegistry {
     public IngestRegistry(
             MeterRegistry meterRegistry,
             ChunkStore store,
-            StitchCache stitchCache,
             @ConfigProperty(name = "jafra.ingest.max-active-streams", defaultValue = "32") int maxActiveStreams,
             @ConfigProperty(name = "jafra.ingest.max-metadata-length", defaultValue = "4096") int maxMetadataLength) {
         this.store = store;
-        this.stitchCache = stitchCache;
         this.maxActiveStreams = maxActiveStreams;
         this.maxMetadataLength = maxMetadataLength;
         this.accepted = meterRegistry.counter("jafra_analyzer_accepted_chunks_total");
@@ -75,7 +71,7 @@ public class IngestRegistry {
                 receivedChunks.get(),
                 rejectedChunks.get(),
                 store.durableChunkCount(),
-                stitchCache.totalBytes());
+                0);
     }
 
     void closeStream(StreamContext context) {

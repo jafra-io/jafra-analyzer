@@ -7,7 +7,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
-import java.time.Duration;
 import java.util.HexFormat;
 
 import org.junit.jupiter.api.Test;
@@ -16,7 +15,6 @@ import org.junit.jupiter.api.io.TempDir;
 import com.google.protobuf.ByteString;
 
 import io.jafra.analyzer.storage.ChunkStore;
-import io.jafra.analyzer.storage.StitchCache;
 import io.jafra.ingest.v1.AckStatus;
 import io.jafra.ingest.v1.ChunkFrame;
 import io.jafra.ingest.v1.CommitChunk;
@@ -30,26 +28,21 @@ class IngestDurabilityTest {
         byte[] payload = "FLR\0chunk-one".getBytes(StandardCharsets.UTF_8);
         ChunkStore store = new ChunkStore(root);
         store.recover();
-        StitchCache cache = new StitchCache(store, 1024 * 1024, Duration.ofMinutes(2), java.time.Clock.systemUTC(), false);
-        IngestRegistry registry = new IngestRegistry(new SimpleMeterRegistry(), store, cache, 8, 4096);
+        IngestRegistry registry = new IngestRegistry(new SimpleMeterRegistry(), store, 8, 4096);
         var accepted = ingest(registry, payload);
         assertEquals(AckStatus.ACCEPTED, accepted.getStatus());
         assertTrue(store.contains(IngestSession.chunkId(open(payload.length))));
-        assertEquals(0, cache.totalBytes());
+        assertEquals(0, registry.status().stitchedBytes());
         assertTrue(Files.walk(root.resolve("recordings"))
                 .noneMatch(path -> path.getFileName().toString().equals("stitched.jfr")));
 
         ChunkStore restarted = new ChunkStore(root);
         restarted.recover();
-        StitchCache restartedCache =
-                new StitchCache(restarted, 1024 * 1024, Duration.ofMinutes(2), java.time.Clock.systemUTC(), false);
-        IngestRegistry afterRestart = new IngestRegistry(new SimpleMeterRegistry(), restarted, restartedCache, 8, 4096);
+        IngestRegistry afterRestart = new IngestRegistry(new SimpleMeterRegistry(), restarted, 8, 4096);
         IngestRegistry.StreamContext replay = afterRestart.openStream();
         var ack = afterRestart.handle(replay, UploadRequest.newBuilder().setOpen(open(payload.length)).build());
         afterRestart.closeStream(replay);
         assertEquals(AckStatus.DUPLICATE, ack.getStatus());
-        cache.close();
-        restartedCache.close();
     }
 
     private static io.jafra.ingest.v1.UploadAck ingest(IngestRegistry registry, byte[] payload) throws Exception {

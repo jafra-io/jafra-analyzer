@@ -1,7 +1,6 @@
 package io.jafra.analyzer.recordings;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -17,8 +16,6 @@ import org.openjdk.jmc.common.item.IItemCollection;
 import org.openjdk.jmc.common.unit.IQuantity;
 import org.openjdk.jmc.common.util.IPreferenceValueProvider;
 import org.openjdk.jmc.common.util.TypedPreference;
-import org.openjdk.jmc.flightrecorder.CouldNotLoadRecordingException;
-import org.openjdk.jmc.flightrecorder.JfrLoaderToolkit;
 import org.openjdk.jmc.flightrecorder.rules.IResult;
 import org.openjdk.jmc.flightrecorder.rules.IRule;
 import org.openjdk.jmc.flightrecorder.rules.ResultProvider;
@@ -28,21 +25,13 @@ import org.openjdk.jmc.flightrecorder.rules.TypedResult;
 
 @ApplicationScoped
 public class JfrReportGenerator {
-    public Map<String, AnalysisFinding> analyze(Path recording, String filter) throws IOException {
-        return analyze(recording, filter, null, null);
+    public Map<String, AnalysisFinding> analyze(List<Path> chunks, String filter) throws IOException {
+        return analyze(chunks, filter, null, null);
     }
 
-    public Map<String, AnalysisFinding> analyze(Path recording, String filter, Instant from, Instant to)
+    public Map<String, AnalysisFinding> analyze(List<Path> chunks, String filter, Instant from, Instant to)
             throws IOException {
-        if (recording == null || !Files.exists(recording) || Files.size(recording) == 0) {
-            throw new IOException("stitched recording is empty");
-        }
-        IItemCollection events;
-        try {
-            events = JfrLoaderToolkit.loadEvents(recording.toFile());
-        } catch (CouldNotLoadRecordingException error) {
-            throw new IOException("unable to load JFR: " + error.getMessage(), error);
-        }
+        IItemCollection events = JfrChunkFiles.load(chunks);
         events = JfrTimeFilter.apply(events, from, to);
         ResultProvider results = new ResultProvider();
         Map<String, AnalysisFinding> findings = new LinkedHashMap<>();

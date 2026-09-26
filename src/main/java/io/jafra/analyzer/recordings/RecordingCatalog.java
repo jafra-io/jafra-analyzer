@@ -1,6 +1,5 @@
 package io.jafra.analyzer.recordings;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -12,7 +11,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -23,18 +21,15 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.jafra.analyzer.storage.ChunkMetadata;
 import io.jafra.analyzer.storage.ChunkFileName;
 import io.jafra.analyzer.storage.ChunkStore;
-import io.jafra.analyzer.storage.StitchCache;
 
 @ApplicationScoped
 public class RecordingCatalog {
     private final ChunkStore store;
-    private final StitchCache stitchCache;
     private final ConcurrentHashMap<String, CachedSpan> timeCache = new ConcurrentHashMap<>();
 
     @Inject
-    public RecordingCatalog(ChunkStore store, StitchCache stitchCache) {
+    public RecordingCatalog(ChunkStore store) {
         this.store = store;
-        this.stitchCache = stitchCache;
     }
 
     public RecordingListResponse list(String namespace, String pod, String container) {
@@ -137,83 +132,42 @@ public class RecordingCatalog {
         if (needFrom.isAfter(needTo)) {
             return Optional.empty();
         }
-        return Optional.of(openCached(
-                selected, dated, start, stop, from, to, needFrom, needTo, bytes, chunks));
+        return Optional.of(openSelection(selected, start, stop, from, to, bytes, chunks));
     }
 
     public WindowSelection singleFile(IndexedRecording recording) throws IOException {
         JfrTimeRange.TimeSpan span = recording.span();
-        return openCached(
-                List.of(recording),
+        return openSelection(
                 List.of(recording),
                 span == null ? null : span.start(),
                 span == null ? null : span.stop(),
                 null,
                 null,
-                span == null ? null : span.start(),
-                span == null ? null : span.stop(),
                 recording.summary().bytes(),
                 recording.summary().chunks());
     }
 
-    private WindowSelection openCached(
+    private WindowSelection openSelection(
             List<IndexedRecording> selected,
-            List<IndexedRecording> workloadDated,
             Instant start,
             Instant stop,
             Instant from,
             Instant to,
-            Instant needFrom,
-            Instant needTo,
             long bytes,
             int chunks)
             throws IOException {
         List<String> recordingIds = selected.stream().map(IndexedRecording::recordingId).toList();
-        WorkloadKey key = selected.getFirst().key();
-        String workloadKey = workloadCacheKey(key);
-        String cacheKey = cacheKey(key, recordingIds);
-        String fingerprint = dataFingerprint(workloadDated);
-        StitchCache.Lease lease = stitchCache.acquireCovering(
-                cacheKey,
-                workloadKey,
-                recordingIds,
-                needFrom,
-                needTo,
-                start,
-                stop,
-                fingerprint);
+        List<Path> chunkFiles = store.contiguousPayloads(recordingIds);
         return new WindowSelection(
-                key,
+                selected.getFirst().key(),
                 selected,
-                lease.path(),
-                lease,
+                chunkFiles,
                 start,
                 stop,
                 from,
                 to,
                 bytes,
                 chunks);
-    }
-
-    static String workloadCacheKey(WorkloadKey key) {
-        return key.namespace() + "|" + key.pod() + "|" + key.container();
-    }
-
-    static String cacheKey(WorkloadKey key, List<String> recordingIds) {
-        return workloadCacheKey(key)
-                + "|"
-                + recordingIds.stream().collect(Collectors.joining(","));
-    }
-
-    static String dataFingerprint(List<IndexedRecording> dated) {
-        return dated.stream()
-                .sorted(Comparator.comparing(IndexedRecording::recordingId))
-                .map(recording -> recording.recordingId()
-                        + ":"
-                        + recording.summary().bytes()
-                        + ":"
-                        + recording.summary().chunks())
-                .collect(Collectors.joining(","));
     }
 
     List<IndexedRecording> index() {
@@ -364,27 +318,13 @@ public class RecordingCatalog {
     public record WindowSelection(
             WorkloadKey key,
             List<IndexedRecording> recordings,
-            Path jfr,
-            StitchCache.Lease lease,
+            List<Path> chunkFiles,
             Instant start,
             Instant stop,
             Instant from,
             Instant to,
             long bytes,
-            int chunks)
-            implements Closeable {
-        @Override
-        public void close() {
-            if (lease != null) {
-                lease.close();
-            }
-        }
-
-        /** @deprecated use lease lifecycle; always false for stitch-cache entries. */
-        public boolean temporary() {
-            return false;
-        }
-    }
+            int chunks) {}
 
     private record CachedSpan(long fingerprint, JfrTimeRange.TimeSpan span) {}
 }

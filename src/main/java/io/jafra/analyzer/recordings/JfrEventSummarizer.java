@@ -1,8 +1,6 @@
 package io.jafra.analyzer.recordings;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -29,8 +27,6 @@ import org.openjdk.jmc.common.unit.IQuantity;
 import org.openjdk.jmc.common.unit.KindOfQuantity;
 import org.openjdk.jmc.common.unit.QuantityConversionException;
 import org.openjdk.jmc.common.unit.UnitLookup;
-import org.openjdk.jmc.flightrecorder.CouldNotLoadRecordingException;
-import org.openjdk.jmc.flightrecorder.JfrLoaderToolkit;
 
 @ApplicationScoped
 public class JfrEventSummarizer {
@@ -46,16 +42,7 @@ public class JfrEventSummarizer {
 
     public EventSummaryDocument summarize(RecordingCatalog.WindowSelection selection, String filter)
             throws IOException {
-        Path recording = selection.jfr();
-        if (recording == null || !Files.exists(recording) || Files.size(recording) == 0) {
-            throw new IOException("stitched recording is empty");
-        }
-        IItemCollection events;
-        try {
-            events = JfrLoaderToolkit.loadEvents(recording.toFile());
-        } catch (CouldNotLoadRecordingException error) {
-            throw new IOException("unable to load JFR: " + error.getMessage(), error);
-        }
+        IItemCollection events = JfrChunkFiles.load(selection.chunkFiles());
         events = JfrTimeFilter.apply(events, selection.from(), selection.to());
         String needle = filter == null ? "" : filter.trim().toLowerCase(Locale.ROOT);
         Map<String, EventSummary> byType = summarizeEvents(events, needle);

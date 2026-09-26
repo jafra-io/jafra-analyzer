@@ -3,8 +3,8 @@
 `jafra-analyzer` version `0.0.2` is a Quarkus gRPC receiver. It validates
 chunk streams, persists each accepted chunk on the 5 GiB PVC at
 `/var/lib/jafra/analyzer`, and serves automated analysis summaries over HTTP.
-Contiguous chunks are stitched on demand into a bounded `stitch-cache/` for
-`/report` and `/summary` (not kept as a second durable copy).
+`/report` and `/summary` pass contiguous chunk files to JMC in stitch order.
+There is no second copy of those bytes.
 
 Durable identity is the chunk id in the file name, the same id the agent already sends. The agent can retry or the analyzer can restart; the same chunk id returns `DUPLICATE` and is not written again. `ACCEPTED` is returned only after the meta file is durable.
 
@@ -15,7 +15,6 @@ Durable identity is the chunk id in the file name, the same id the agent already
   tmp/<chunkId>.part                              # in-flight frames; discarded on abort/recover
   data/<4-hour>/<search>-<chunkId>                # committed payload (durable)
   meta/<4-hour>/<search>-<chunkId>                # same name as the payload
-  stitch-cache/<hash>.jfr                         # on-demand analysis JFRs (TTL + ~1–2 Gi budget)
   identities/<podUID>.json                        # namespace + pod name for HTTP queries
 ```
 
@@ -25,9 +24,7 @@ A query opens the 4-hour folders, lists names, and keeps files whose name matche
 
 Files left in the old `chunks/<chunkId>.jfr` and `chunks/<chunkId>.meta` layout are moved into `data/` and `meta/` on startup. A payload with no meta is deleted. The move reads the JFR header once when the old meta has no start time.
 
-Out-of-order chunks stay on disk until the hole at offset 0 is filled; only the contiguous prefix is available to stitch into the cache.
-
-The stitch-cache reaper deletes unused entries after TTL (default 2 minutes) or when the cache exceeds `jafra.storage.stitch-cache.max-bytes` (default 2 Gi). It never deletes `data/` or `meta/`.
+Out-of-order chunks stay on disk until the hole at offset 0 is filled; only the contiguous prefix is passed to JMC. Startup deletes a leftover `stitch-cache/` directory from older builds. It never deletes `data/` or `meta/`.
 
 ## Build
 
@@ -51,11 +48,11 @@ kubectl exec -n jafra-system deploy/jafra-analyzer -- ls -la /var/lib/jafra/anal
 ```
 
 Restart the analyzer and confirm previously accepted IDs stay `DUPLICATE`
-(payloads remain under `data/`; stitch-cache may be empty until the next `/report`).
+(payloads remain under `data/`).
 
 Ports: `9090` gRPC, `8080` HTTP (`GET /health`, `GET /api/v1/status`,
 `GET /q/health`, `GET /q/metrics`). Status includes `durableChunks` and
-`stitchedBytes` (current stitch-cache size).
+`stitchedBytes` (always `0`; kept so older clients still parse the JSON).
 
 ## Summary APIs
 
@@ -104,10 +101,10 @@ curl 'http://127.0.0.1:8080/api/v1/namespaces/default/pods/auth-cache-abc/contai
 ```
 
 `last` accepts `5m`, `5mins`, `5 minutes`, `1h`, `1 hour`, `90s`, and `1d`
-(up to 7 days) and is a wall-clock window ending at request time. The stitch
-cache reuses an existing JFR when no new recordings have arrived and the
-cached file's time span still covers the clipped request range; `/report` and
-`/summary` then filter events to the requested `from`/`to`. Absolute
+(up to 7 days) and is a wall-clock window ending at request time. Analysis
+reads the overlapping recordings' chunk files in the order they used to be
+stitched: recording order, then offset order inside each recording. `/report`
+and `/summary` then filter events to the requested `from`/`to`. Absolute
 `from` / `to` / `before` / `after` are ISO-8601 timestamps. `from` alone reads
 through now; `to` alone reads from the earliest stored file. Do not combine
 `last`, `from`/`to`, `before`, and `after`. A valid window with no overlapping
@@ -143,15 +140,15 @@ the same pod UID arrives.
 
 ## Intentional limitations
 
-- Stitching concatenates finalized JFR chunks. On-demand reports and event
-  summaries can merge overlapping rotations for a time window. `/report` uses
-  JMC rules; `/summary` returns raw per-event aggregates. It does not upload
-  to S3.
+- Analysis reads finalized JFR chunks through JMC in stitch order. It does not
+  write a concatenated file. On-demand reports and event summaries can merge
+  overlapping rotations for a time window. `/report` uses JMC rules; `/summary`
+  returns raw per-event aggregates. It does not upload to S3.
 - The PVC is ReadWriteOnce; a single replica owns the store. Analyzer memory
 is sized for `jfrsync=default` recordings (`-Xmx1024m`, 2Gi limit).
 - Duplicate detection is local to this volume. Replacing the PVC looks like
   a first-time ingest to the analyzer.
 - `quarkus.log.console.json` is ignored unless `quarkus-logging-json` is
-  added. Chunk and stitch metadata are already JSON strings in log messages.
+  added. Chunk metadata is already JSON strings in log messages.
 - The gRPC server currently uses Quarkus legacy separate-server mode on port
   `9090`.

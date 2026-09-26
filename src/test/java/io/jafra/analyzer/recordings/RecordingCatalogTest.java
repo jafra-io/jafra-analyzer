@@ -1,8 +1,11 @@
 package io.jafra.analyzer.recordings;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -14,7 +17,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import io.jafra.analyzer.storage.ChunkMetadata;
 import io.jafra.analyzer.storage.ChunkStore;
-import io.jafra.analyzer.storage.StitchCache;
 
 class RecordingCatalogTest {
     @Test
@@ -39,7 +41,6 @@ class RecordingCatalogTest {
         RecordingCatalog.RecordingListResponse byPod = fixture.catalog.list(null, "pod-b", null);
         assertEquals("worker", byPod.workloads().getFirst().container());
         assertEquals(1, byPod.workloads().getFirst().recordings().size());
-        fixture.close();
     }
 
     @Test
@@ -49,7 +50,6 @@ class RecordingCatalogTest {
         persist(fixture.store, "c1", "ns-a", "pod-a", "app", "profile-1.jfr", new byte[] {2});
         persist(fixture.store, "c2", "ns-a", "pod-a", "app", "profile-2.jfr", new byte[] {3});
         assertEquals("profile-1.jfr", fixture.catalog.latestClosed("ns-a", "pod-a", "app").summary().filename());
-        fixture.close();
     }
 
     @Test
@@ -65,11 +65,10 @@ class RecordingCatalogTest {
                 .getFirst();
         assertEquals("2026-08-17T09:00:00Z", summary.start());
         assertEquals("2026-08-17T09:01:00Z", summary.end());
-        fixture.close();
     }
 
     @Test
-    void windowMergesOverlappingRotationsViaStitchCache(@TempDir Path root) throws Exception {
+    void windowMergesOverlappingRotationsInStitchOrder(@TempDir Path root) throws Exception {
         CatalogFixture fixture = CatalogFixture.create(root);
         Instant t0 = Instant.parse("2026-08-17T09:00:00Z");
         Instant t1 = Instant.parse("2026-08-17T09:01:00Z");
@@ -79,58 +78,53 @@ class RecordingCatalogTest {
         persist(fixture.store, "c1", "ns-a", "pod-a", "app", "profile-1.jfr", timedJfr(t1, Duration.ofMinutes(1)));
         persist(fixture.store, "c2", "ns-a", "pod-a", "app", "profile-2.jfr", timedJfr(t2, Duration.ofMinutes(1)));
 
-        try (RecordingCatalog.WindowSelection lastFive = fixture.catalog.openWindow(
+        RecordingCatalog.WindowSelection lastFive = fixture.catalog.openWindow(
                         "ns-a", "pod-a", "app", ReportWindow.parse(now, "5m", null, null, null, null))
-                .orElseThrow()) {
-            assertEquals(List.of("profile-2.jfr"), filenames(lastFive));
-            assertTrue(lastFive.jfr().startsWith(fixture.cache.cacheDir()));
-        }
+                .orElseThrow();
+        assertEquals(List.of("profile-2.jfr"), filenames(lastFive));
+        assertEquals(payloads(fixture.store, "profile-2.jfr"), lastFive.chunkFiles());
+        assertFalse(Files.exists(root.resolve("stitch-cache")));
 
-        Path cached;
-        try (RecordingCatalog.WindowSelection lastFifteen = fixture.catalog.openWindow(
+        RecordingCatalog.WindowSelection lastFifteen = fixture.catalog.openWindow(
                         "ns-a", "pod-a", "app", ReportWindow.parse(now, "15mins", null, null, null, null))
-                .orElseThrow()) {
-            assertEquals(List.of("profile-0.jfr", "profile-1.jfr", "profile-2.jfr"), filenames(lastFifteen));
-            assertTrue(lastFifteen.jfr().toFile().length() > 0);
-            cached = lastFifteen.jfr();
-        }
-        try (RecordingCatalog.WindowSelection again = fixture.catalog.openWindow(
-                        "ns-a", "pod-a", "app", ReportWindow.parse(now, "15mins", null, null, null, null))
-                .orElseThrow()) {
-            assertEquals(cached, again.jfr());
-        }
+                .orElseThrow();
+        assertEquals(List.of("profile-0.jfr", "profile-1.jfr", "profile-2.jfr"), filenames(lastFifteen));
+        List<Path> fifteenFiles = payloads(fixture.store, "profile-0.jfr", "profile-1.jfr", "profile-2.jfr");
+        assertEquals(fifteenFiles, lastFifteen.chunkFiles());
 
-        // Wall clock slides; narrower last= still covered by the wider stitch while data is unchanged.
+        RecordingCatalog.WindowSelection again = fixture.catalog.openWindow(
+                        "ns-a", "pod-a", "app", ReportWindow.parse(now, "15mins", null, null, null, null))
+                .orElseThrow();
+        assertEquals(fifteenFiles, again.chunkFiles());
+
         Instant laterNow = now.plus(Duration.ofMinutes(3));
-        try (RecordingCatalog.WindowSelection narrower = fixture.catalog.openWindow(
+        RecordingCatalog.WindowSelection narrower = fixture.catalog.openWindow(
                         "ns-a", "pod-a", "app", ReportWindow.parse(laterNow, "5m", null, null, null, null))
-                .orElseThrow()) {
-            assertEquals(List.of("profile-2.jfr"), filenames(narrower));
-            assertEquals(cached, narrower.jfr());
-            assertEquals(laterNow.minus(Duration.ofMinutes(5)), narrower.from());
-            assertEquals(laterNow, narrower.to());
-        }
+                .orElseThrow();
+        assertEquals(List.of("profile-2.jfr"), filenames(narrower));
+        assertEquals(payloads(fixture.store, "profile-2.jfr"), narrower.chunkFiles());
+        assertNotEquals(fifteenFiles, narrower.chunkFiles());
+        assertEquals(laterNow.minus(Duration.ofMinutes(5)), narrower.from());
+        assertEquals(laterNow, narrower.to());
 
-        try (RecordingCatalog.WindowSelection ranged = fixture.catalog.openWindow(
+        RecordingCatalog.WindowSelection ranged = fixture.catalog.openWindow(
                         "ns-a",
                         "pod-a",
                         "app",
                         ReportWindow.parse(now, null, "2026-08-17T09:00:30Z", "2026-08-17T09:01:30Z", null, null))
-                .orElseThrow()) {
-            assertEquals(List.of("profile-0.jfr", "profile-1.jfr"), filenames(ranged));
-        }
+                .orElseThrow();
+        assertEquals(List.of("profile-0.jfr", "profile-1.jfr"), filenames(ranged));
+        assertEquals(payloads(fixture.store, "profile-0.jfr", "profile-1.jfr"), ranged.chunkFiles());
 
-        try (RecordingCatalog.WindowSelection before = fixture.catalog.openWindow(
+        RecordingCatalog.WindowSelection before = fixture.catalog.openWindow(
                         "ns-a", "pod-a", "app", ReportWindow.parse(now, null, null, null, "2026-08-17T09:01:00Z", null))
-                .orElseThrow()) {
-            assertEquals(List.of("profile-0.jfr"), filenames(before));
-        }
+                .orElseThrow();
+        assertEquals(List.of("profile-0.jfr"), filenames(before));
 
-        try (RecordingCatalog.WindowSelection after = fixture.catalog.openWindow(
+        RecordingCatalog.WindowSelection after = fixture.catalog.openWindow(
                         "ns-a", "pod-a", "app", ReportWindow.parse(now, null, null, null, null, "2026-08-17T09:08:00Z"))
-                .orElseThrow()) {
-            assertEquals(List.of("profile-2.jfr"), filenames(after));
-        }
+                .orElseThrow();
+        assertEquals(List.of("profile-2.jfr"), filenames(after));
 
         Optional<RecordingCatalog.WindowSelection> missing = fixture.catalog.openWindow(
                 "ns-a",
@@ -138,7 +132,7 @@ class RecordingCatalogTest {
                 "app",
                 ReportWindow.parse(now, null, "2020-01-01T00:00:00Z", "2020-01-02T00:00:00Z", null, null));
         assertTrue(missing.isEmpty());
-        fixture.close();
+        assertFalse(Files.exists(root.resolve("stitch-cache")));
     }
 
     @Test
@@ -151,7 +145,6 @@ class RecordingCatalogTest {
         fixture.store.rememberPodName("default", "uid", "app-pod");
         RecordingCatalog.RecordingListResponse listed = fixture.catalog.list("default", "app-pod", "app");
         assertEquals(2, listed.workloads().getFirst().recordings().size());
-        fixture.close();
     }
 
     private static void persist(
@@ -194,17 +187,19 @@ class RecordingCatalogTest {
         return selected.recordings().stream().map(recording -> recording.summary().filename()).toList();
     }
 
-    private record CatalogFixture(ChunkStore store, StitchCache cache, RecordingCatalog catalog) {
+    private static List<Path> payloads(ChunkStore store, String... filenames) throws Exception {
+        List<String> recordingIds = new java.util.ArrayList<>();
+        for (String filename : filenames) {
+            recordingIds.add("local-demo/uid/app/" + filename);
+        }
+        return store.contiguousPayloads(recordingIds);
+    }
+
+    private record CatalogFixture(ChunkStore store, RecordingCatalog catalog) {
         static CatalogFixture create(Path root) throws Exception {
             ChunkStore store = new ChunkStore(root);
             store.recover();
-            StitchCache cache = new StitchCache(
-                    store, 16 * 1024 * 1024, Duration.ofMinutes(5), java.time.Clock.systemUTC(), false);
-            return new CatalogFixture(store, cache, new RecordingCatalog(store, cache));
-        }
-
-        void close() {
-            cache.close();
+            return new CatalogFixture(store, new RecordingCatalog(store));
         }
     }
 }

@@ -75,6 +75,7 @@ public class ChunkStore {
         migrateLegacyChunks();
         deleteOrphanPayloads();
         deleteLegacyStitchedRecordings();
+        deleteStitchCache();
         indexStoredNames();
         LOG.infof("recovered %d durable chunks under %s", chunkIds.size(), root);
     }
@@ -91,7 +92,7 @@ public class ChunkStore {
         return chunkIds.size();
     }
 
-    /** Bytes of durable chunk payloads (not stitch-cache). */
+    /** Bytes of durable chunk payloads. */
     public long chunksBytes() {
         long total = 0;
         for (Path payload : payloadPaths.values()) {
@@ -105,7 +106,7 @@ public class ChunkStore {
     }
 
     /**
-     * @deprecated Prefer {@link #chunksBytes()} or stitch-cache size; kept for status JSON compatibility.
+     * @deprecated Prefer {@link #chunksBytes()}. Status JSON still has {@code stitchedBytes} and always reports 0.
      */
     @Deprecated
     public long stitchedBytes() {
@@ -207,7 +208,7 @@ public class ChunkStore {
         }
     }
 
-    /** Remember meta that a query already selected, so stitching can order that recording. */
+    /** Remember meta that a query already selected, so analysis can order that recording. */
     public void absorb(ChunkMetadata metadata) {
         if (metadata == null || metadata.chunkId() == null || metadata.recordingId() == null) {
             return;
@@ -274,60 +275,21 @@ public class ChunkStore {
     }
 
     /**
-     * Concatenate contiguous chunk payloads for each recording id (in order) into {@code target}.
-     *
-     * @return bytes written
+     * Payload paths in the order a stitch used to write them: each recording id, then that
+     * recording's contiguous chunks from offset 0. A hole stops the prefix.
      */
-    public long stitchTo(Path target, List<String> recordingIds) throws IOException {
-        Files.createDirectories(target.getParent());
-        Path part = target.resolveSibling(target.getFileName() + ".part");
-        Files.deleteIfExists(part);
-        long written = 0;
-        try (FileChannel out = FileChannel.open(
-                part,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.WRITE,
-                StandardOpenOption.TRUNCATE_EXISTING)) {
-            for (String recordingId : recordingIds) {
-                List<ChunkMetadata> contiguous = contiguousChunks(recordingId);
-                if (contiguous.isEmpty()) {
-                    throw new IOException("no contiguous chunks for " + recordingId);
-                }
-                for (ChunkMetadata chunk : contiguous) {
-                    try (FileChannel in = FileChannel.open(payloadPath(chunk.chunkId()), StandardOpenOption.READ)) {
-                        long copied = 0;
-                        while (copied < chunk.chunkLength()) {
-                            long n = in.transferTo(copied, chunk.chunkLength() - copied, out);
-                            if (n <= 0) {
-                                throw new IOException("short read while stitching " + chunk.chunkId());
-                            }
-                            copied += n;
-                        }
-                    }
-                    written += chunk.chunkLength();
-                }
-            }
-            out.force(true);
-        } catch (IOException error) {
-            Files.deleteIfExists(part);
-            throw error;
-        }
-        Files.move(part, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        LOG.infof(
-                "{\"event\":\"jfr_recording_stitched\",\"recording_ids\":\"%s\",\"stitched_bytes\":%d}",
-                String.join(",", recordingIds),
-                written);
-        return written;
-    }
-
-    public long contiguousBytes(List<String> recordingIds) {
-        long total = 0;
+    public List<Path> contiguousPayloads(List<String> recordingIds) throws IOException {
+        List<Path> paths = new ArrayList<>();
         for (String recordingId : recordingIds) {
-            for (ChunkMetadata chunk : contiguousChunks(recordingId)) {
-                total += chunk.chunkLength();
+            List<ChunkMetadata> contiguous = contiguousChunks(recordingId);
+            if (contiguous.isEmpty()) {
+                throw new IOException("no contiguous chunks for " + recordingId);
+            }
+            for (ChunkMetadata chunk : contiguous) {
+                paths.add(payloadPath(chunk.chunkId()));
             }
         }
-        return total;
+        return List.copyOf(paths);
     }
 
     public String podName(String podUid, String stored) {
@@ -487,6 +449,26 @@ public class ChunkStore {
                 }
             });
         }
+    }
+
+    private void deleteStitchCache() throws IOException {
+        Path cacheDir = root.resolve("stitch-cache");
+        if (!Files.exists(cacheDir)) {
+            return;
+        }
+        Files.walkFileTree(cacheDir, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                deleteQuietly(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException error) {
+                deleteQuietly(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 
     private void deleteLegacyStitchedRecordings() throws IOException {

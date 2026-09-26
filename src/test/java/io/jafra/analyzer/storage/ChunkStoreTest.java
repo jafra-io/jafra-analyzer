@@ -3,8 +3,11 @@ package io.jafra.analyzer.storage;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
@@ -33,9 +36,9 @@ class ChunkStoreTest {
         assertEquals(List.of("chunk-a"), restarted.contiguousChunks(first.recordingId()).stream()
                 .map(ChunkMetadata::chunkId)
                 .toList());
-        Path stitched = root.resolve("on-demand.jfr");
-        assertEquals(4, restarted.stitchTo(stitched, List.of(first.recordingId())));
-        assertArrayEquals(new byte[] {1, 2, 3, 4}, Files.readAllBytes(stitched));
+        assertArrayEquals(
+                new byte[] {1, 2, 3, 4},
+                readInOrder(restarted.contiguousPayloads(List.of(first.recordingId()))));
     }
 
     @Test
@@ -63,13 +66,43 @@ class ChunkStoreTest {
         byte[] later = new byte[] {5, 6};
         persist(store, metadata("chunk-b", 4, later), later);
         assertTrue(store.contiguousChunks("local-demo/pod/auth-cache/profile-0.jfr").isEmpty());
+        assertThrows(
+                IOException.class,
+                () -> store.contiguousPayloads(List.of("local-demo/pod/auth-cache/profile-0.jfr")));
 
         byte[] early = new byte[] {1, 2, 3, 4};
         persist(store, metadata("chunk-a", 0, early), early);
         assertEquals(2, store.contiguousChunks("local-demo/pod/auth-cache/profile-0.jfr").size());
-        Path stitched = root.resolve("stitched-on-demand.jfr");
-        store.stitchTo(stitched, List.of("local-demo/pod/auth-cache/profile-0.jfr"));
-        assertArrayEquals(new byte[] {1, 2, 3, 4, 5, 6}, Files.readAllBytes(stitched));
+        List<Path> paths = store.contiguousPayloads(List.of("local-demo/pod/auth-cache/profile-0.jfr"));
+        assertEquals(List.of("chunk-a", "chunk-b"), chunkIds(paths));
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5, 6}, readInOrder(paths));
+    }
+
+    @Test
+    void contiguousPayloadsFollowRecordingThenOffsetOrder(@TempDir Path root) throws Exception {
+        ChunkStore store = new ChunkStore(root);
+        store.recover();
+        persist(store, metadata("b0", "rec-b", 0, new byte[] {9}), new byte[] {9});
+        persist(store, metadata("a1", "rec-a", 2, new byte[] {3, 4}), new byte[] {3, 4});
+        persist(store, metadata("a0", "rec-a", 0, new byte[] {1, 2}), new byte[] {1, 2});
+
+        List<Path> paths = store.contiguousPayloads(List.of("rec-a", "rec-b"));
+        assertEquals(List.of("a0", "a1", "b0"), chunkIds(paths));
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 9}, readInOrder(paths));
+        assertArrayEquals(
+                new byte[] {9, 1, 2, 3, 4},
+                readInOrder(store.contiguousPayloads(List.of("rec-b", "rec-a"))));
+    }
+
+    @Test
+    void recoverDeletesLeftoverStitchCache(@TempDir Path root) throws Exception {
+        Path cache = root.resolve("stitch-cache");
+        Files.createDirectories(cache);
+        Files.write(cache.resolve("abc.jfr"), new byte[] {1, 2, 3});
+
+        ChunkStore store = new ChunkStore(root);
+        store.recover();
+        assertFalse(Files.exists(cache));
     }
 
     @Test
@@ -124,6 +157,20 @@ class ChunkStoreTest {
         assertTrue(restarted.contains("chunk-a"));
     }
 
+    private static List<String> chunkIds(List<Path> paths) {
+        return paths.stream()
+                .map(path -> ChunkFileName.parse(path.getFileName().toString()).chunkId())
+                .toList();
+    }
+
+    private static byte[] readInOrder(List<Path> paths) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (Path path : paths) {
+            out.write(Files.readAllBytes(path));
+        }
+        return out.toByteArray();
+    }
+
     private static void persist(ChunkStore store, ChunkMetadata metadata, byte[] payload) throws Exception {
         ChunkStore.IncomingWrite write = store.beginWrite(metadata.chunkId());
         write.write(payload);
@@ -131,9 +178,13 @@ class ChunkStoreTest {
     }
 
     private static ChunkMetadata metadata(String chunkId, long offset, byte[] payload) {
+        return metadata(chunkId, "local-demo/pod/auth-cache/profile-0.jfr", offset, payload);
+    }
+
+    private static ChunkMetadata metadata(String chunkId, String recordingId, long offset, byte[] payload) {
         return new ChunkMetadata(
                 chunkId,
-                "local-demo/pod/auth-cache/profile-0.jfr",
+                recordingId,
                 "local-demo",
                 "default",
                 "pod",

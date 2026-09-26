@@ -68,7 +68,7 @@ public class RecordingResource {
         return withSelection(namespace, pod, container, recording, last, from, to, before, after, selection -> {
             try {
                 return reports.report(
-                        selection, reports.analyze(selection.jfr(), filter, selection.from(), selection.to()));
+                        selection, reports.analyze(selection.chunkFiles(), filter, selection.from(), selection.to()));
             } catch (IOException error) {
                 throw unavailable(selection, error.getMessage());
             }
@@ -110,7 +110,7 @@ public class RecordingResource {
         return withSelection(namespace, pod, container, filename, null, null, null, null, null, selection -> {
             try {
                 return reports.report(
-                        selection, reports.analyze(selection.jfr(), filter, selection.from(), selection.to()));
+                        selection, reports.analyze(selection.chunkFiles(), filter, selection.from(), selection.to()));
             } catch (IOException error) {
                 throw unavailable(selection, error.getMessage());
             }
@@ -174,9 +174,7 @@ public class RecordingResource {
         } catch (IOException error) {
             throw unavailable(namespace, pod, container, recording == null ? "window" : recording, error.getMessage());
         }
-        try (RecordingCatalog.WindowSelection selection = selected) {
-            return action.apply(selection);
-        }
+        return action.apply(selected);
     }
 
     private static WebApplicationException missingWindow(
